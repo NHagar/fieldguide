@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from email import policy
 from functools import lru_cache
@@ -72,6 +73,7 @@ ORG_WORDS = {
 class ExtractedFile:
     text: str
     pages: list[str]
+    topic_pages: list[str] | None
     doc_type: str
     extraction_method: str
     metadata: dict[str, Any]
@@ -115,15 +117,16 @@ def detect_doc_type(path: Path) -> str:
     return "unknown"
 
 
-def extract_file(path: Path) -> ExtractedFile:
+def extract_file(path: Path, *, pdf_backend: str = "legacy") -> ExtractedFile:
     doc_type = detect_doc_type(path)
     warnings: list[str] = []
     metadata: dict[str, Any] = {}
+    topic_pages: list[str] | None = None
     method = "native_text"
 
     try:
         if doc_type == "pdf":
-            text, warnings, method, metadata = _extract_pdf(path)
+            text, warnings, method, metadata, topic_pages = _extract_pdf(path, backend=pdf_backend)
         elif doc_type == "email":
             text, metadata, warnings = _extract_email(path)
             method = "email_parser"
@@ -160,6 +163,7 @@ def extract_file(path: Path) -> ExtractedFile:
     return ExtractedFile(
         text=text,
         pages=pages,
+        topic_pages=topic_pages,
         doc_type=doc_type,
         extraction_method=method,
         metadata=metadata,
@@ -195,7 +199,22 @@ def _extract_html(path: Path) -> str:
     return parser.text()
 
 
-def _extract_pdf(path: Path) -> tuple[str, list[str], str, dict[str, Any]]:
+def _extract_pdf(path: Path, *, backend: str = "legacy") -> tuple[str, list[str], str, dict[str, Any], list[str] | None]:
+    if backend == "docling":
+        text, warnings, metadata, topic_pages = _extract_pdf_docling(path)
+        if text.strip():
+            return text, warnings, "docling", metadata, topic_pages
+        legacy_text, legacy_warnings, legacy_method, legacy_metadata, legacy_topic_pages = _extract_pdf(path, backend="legacy")
+        return (
+            legacy_text,
+            [*warnings, "docling produced no usable text; fell back to legacy PDF extraction", *legacy_warnings],
+            legacy_method,
+            {**legacy_metadata, **metadata, "pdf_backend_fallback": "legacy"},
+            legacy_topic_pages,
+        )
+    if backend != "legacy":
+        raise ValueError(f"unsupported pdf_backend: {backend}")
+
     warnings: list[str] = []
     executable = shutil.which("pdftotext")
     if not executable:
@@ -212,16 +231,100 @@ def _extract_pdf(path: Path) -> tuple[str, list[str], str, dict[str, Any]]:
             stderr = completed.stderr.strip()
             warnings.append(f"pdftotext failed: {stderr or completed.returncode}")
         elif completed.stdout.strip():
-            return completed.stdout, warnings, "native_text", {}
+            return completed.stdout, warnings, "native_text", {"pdf_backend": "legacy"}, None
         else:
             warnings.append("pdftotext produced no usable text; attempting OCR fallback")
 
     ocr_text, ocr_warnings, ocr_confidence = _ocr_pdf(path)
     warnings.extend(ocr_warnings)
     if ocr_text.strip():
-        metadata = {"ocr_confidence": ocr_confidence} if ocr_confidence is not None else {}
-        return ocr_text, warnings, "ocr", metadata
-    return "", warnings, "failed", {}
+        metadata = {"pdf_backend": "legacy"}
+        if ocr_confidence is not None:
+            metadata["ocr_confidence"] = ocr_confidence
+        return ocr_text, warnings, "ocr", metadata, None
+    return "", warnings, "failed", {"pdf_backend": "legacy"}, None
+
+
+def _extract_pdf_docling(path: Path) -> tuple[str, list[str], dict[str, Any], list[str] | None]:
+    try:
+        from docling.document_converter import DocumentConverter
+    except ImportError:
+        return "", ["docling is not installed; PDF docling backend skipped"], {"pdf_backend": "docling"}, None
+
+    warnings: list[str] = []
+    converter = _docling_converter()
+    result = converter.convert(path)
+    status = getattr(result, "status", None)
+    document = getattr(result, "document", None)
+    if document is None:
+        return "", [f"docling conversion produced no document; status={status}"], {"pdf_backend": "docling", "docling_status": str(status)}, None
+
+    text_pages, topic_pages, label_counts = _docling_pages(document)
+    text = "\f".join(text_pages)
+    topic_text_available = any(page.strip() for page in topic_pages)
+    metadata = {
+        "pdf_backend": "docling",
+        "docling_status": str(status),
+        "docling_label_counts": dict(sorted(label_counts.items())),
+        "topic_text_available": topic_text_available,
+    }
+    if status is not None and "SUCCESS" not in str(status).upper():
+        warnings.append(f"docling conversion status: {status}")
+    return text, warnings, metadata, topic_pages if topic_text_available else None
+
+
+@lru_cache(maxsize=1)
+def _docling_converter() -> Any:
+    from docling.document_converter import DocumentConverter
+
+    return DocumentConverter()
+
+
+def _docling_pages(document: Any) -> tuple[list[str], list[str], Counter[str]]:
+    text_by_page: dict[int, list[str]] = defaultdict(list)
+    topic_by_page: dict[int, list[str]] = defaultdict(list)
+    label_counts: Counter[str] = Counter()
+    for item, _level in document.iterate_items():
+        text = str(getattr(item, "text", "") or "").strip()
+        if not text:
+            continue
+        label = _docling_label(getattr(item, "label", "unknown"))
+        label_counts[label] += 1
+        page_no = _docling_page_number(getattr(item, "prov", None))
+        text_by_page[page_no].append(text)
+        if _docling_label_for_topics(label):
+            topic_by_page[page_no].append(text)
+
+    page_numbers = sorted(set(text_by_page) | set(topic_by_page)) or [1]
+    text_pages = ["\n".join(text_by_page.get(page_no, [])).strip() for page_no in page_numbers]
+    topic_pages = ["\n".join(topic_by_page.get(page_no, [])).strip() for page_no in page_numbers]
+    return text_pages, topic_pages, label_counts
+
+
+def _docling_label(label: Any) -> str:
+    return str(getattr(label, "value", label)).lower()
+
+
+def _docling_page_number(provenance: Any) -> int:
+    if not provenance:
+        return 1
+    first = provenance[0]
+    if isinstance(first, dict):
+        return int(first.get("page_no") or 1)
+    return int(getattr(first, "page_no", 1) or 1)
+
+
+def _docling_label_for_topics(label: str) -> bool:
+    excluded = {
+        "caption",
+        "footnote",
+        "formula",
+        "page_footer",
+        "page_header",
+        "picture",
+        "table",
+    }
+    return label not in excluded
 
 
 def _ocr_pdf(path: Path) -> tuple[str, list[str], float | None]:

@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1",
+    "docling>=2.102.2",
     "en-core-web-md",
     "en-core-web-sm",
     "spacy>=3.8,<4",

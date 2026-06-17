@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import math
 import hashlib
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .extractors import extract_entities, extract_file, extraction_quality, file_metadata
 from .text import (
@@ -32,6 +33,9 @@ CANONICAL_TEXT_VERSION = "fieldguide-canonical-v1"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "corpus": {"max_top_topics": 10, "max_topic_depth": 4},
+    "extraction": {
+        "pdf_backend": "legacy",
+    },
     "chunking": {
         "target_chunk_chars": 1800,
         "min_chunk_chars": 500,
@@ -99,6 +103,7 @@ def build_index(
     corpus_id: str = "C-FIELDGUIDE",
     corpus_version: str = "v1",
     config: dict[str, Any] | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> BuildStats:
     """Build a local JSON index from a directory of source files."""
 
@@ -111,7 +116,33 @@ def build_index(
     chunks: list[dict[str, Any]] = []
     entities: list[dict[str, Any]] = []
 
-    for path in _iter_source_files(source_root, output_dir):
+    source_files = list(_iter_source_files(source_root, output_dir))
+    started_at = time.monotonic()
+    if progress:
+        progress(
+            {
+                "event": "build_start",
+                "total_files": len(source_files),
+                "source_dir": str(source_root),
+                "index_dir": str(output_dir),
+                "pdf_backend": merged_config["extraction"].get("pdf_backend", "legacy"),
+            }
+        )
+
+    for file_index, path in enumerate(source_files, start=1):
+        relative_path = str(path.relative_to(source_root))
+        doc_started_at = time.monotonic()
+        if progress:
+            progress(
+                {
+                    "event": "document_start",
+                    "index": file_index,
+                    "total_files": len(source_files),
+                    "source_uri": relative_path,
+                    "size_bytes": path.stat().st_size,
+                    "elapsed_seconds": doc_started_at - started_at,
+                }
+            )
         document, doc_chunks, doc_entities = _document_from_file(
             path,
             source_root=source_root,
@@ -122,17 +153,58 @@ def build_index(
         documents.append(document)
         chunks.extend(doc_chunks)
         entities.extend(doc_entities)
+        total_elapsed = time.monotonic() - started_at
+        doc_elapsed = time.monotonic() - doc_started_at
+        average_seconds = total_elapsed / file_index if file_index else 0.0
+        remaining = max(0, len(source_files) - file_index)
+        if progress:
+            progress(
+                {
+                    "event": "document_done",
+                    "index": file_index,
+                    "total_files": len(source_files),
+                    "source_uri": relative_path,
+                    "doc_id": document["doc_id"],
+                    "doc_type": document["doc_type"],
+                    "extraction_method": document["extraction"]["extraction_method"],
+                    "page_count": document["page_count"],
+                    "chunk_count": len(doc_chunks),
+                    "duration_seconds": doc_elapsed,
+                    "elapsed_seconds": total_elapsed,
+                    "average_seconds_per_file": average_seconds,
+                    "eta_seconds": average_seconds * remaining,
+                }
+            )
 
     documents.sort(key=lambda item: item["doc_id"])
     chunks.sort(key=lambda item: item["chunk_id"])
     entities.sort(key=lambda item: (item["doc_id"], item.get("char_start") or 0, item["text"]))
     _add_duplicate_relationships(documents)
 
+    if progress:
+        progress(
+            {
+                "event": "topicing_start",
+                "doc_count": len(documents),
+                "page_count": sum(len(doc.get("pages", [])) for doc in documents),
+                "chunk_count": len(chunks),
+                "entity_count": len(entities),
+                "elapsed_seconds": time.monotonic() - started_at,
+            }
+        )
     vectors, idf = _build_document_vectors(documents)
     topics = _build_topics(documents, chunks, entities, vectors, idf, corpus_id, corpus_version, merged_config)
     scopes = _build_scopes(topics, documents, corpus_id, corpus_version)
     _attach_topic_memberships(documents, topics, vectors, merged_config)
     _attach_topic_representatives(topics, documents, chunks, entities, vectors, merged_config)
+    if progress:
+        progress(
+            {
+                "event": "topicing_done",
+                "topic_count": len(topics),
+                "elapsed_seconds": time.monotonic() - started_at,
+            }
+        )
 
     index = {
         "corpus_id": corpus_id,
@@ -150,6 +222,18 @@ def build_index(
 
     index_path = output_dir / INDEX_FILENAME
     index_path.write_text(json.dumps(index, indent=2, sort_keys=True), encoding="utf-8")
+    if progress:
+        progress(
+            {
+                "event": "build_done",
+                "doc_count": len(documents),
+                "page_count": sum(len(doc["pages"]) for doc in documents),
+                "chunk_count": len(chunks),
+                "topic_count": len(topics),
+                "elapsed_seconds": time.monotonic() - started_at,
+                "index_path": str(index_path),
+            }
+        )
     return BuildStats(
         corpus_id=corpus_id,
         corpus_version=corpus_version,
@@ -1129,10 +1213,11 @@ def _document_from_file(
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     raw = path.read_bytes()
     sha256 = hashlib.sha256(raw).hexdigest()
-    extracted = extract_file(path)
+    extracted = extract_file(path, pdf_backend=config["extraction"].get("pdf_backend", "legacy"))
     file_meta = file_metadata(path, source_root)
     doc_id = stable_id("D", file_meta["source_uri"], sha256, length=12)
     canonical_text, pages = _canonical_pages(extracted.pages)
+    topic_text, _topic_pages = _canonical_pages(extracted.topic_pages or extracted.pages)
     quality = extraction_quality(
         extracted.extraction_method,
         extracted.warnings,
@@ -1175,6 +1260,7 @@ def _document_from_file(
         "page_count": len(page_records),
         "char_count": len(canonical_text),
         "token_estimate": estimate_tokens(canonical_text),
+        "topic_token_estimate": estimate_tokens(topic_text),
         "extraction": quality,
         "metadata": {**file_meta, **extracted.metadata, "sha256": sha256},
         "relationships": [],
@@ -1186,6 +1272,7 @@ def _document_from_file(
         },
         "pages": page_records,
         "canonical_text": canonical_text,
+        "topic_text": topic_text,
     }
     return document, chunks, page_entities
 
@@ -1286,9 +1373,7 @@ def _build_document_vectors(documents: list[dict[str, Any]]) -> tuple[dict[str, 
     doc_counts: dict[str, Counter[str]] = {}
     df: Counter[str] = Counter()
     for doc in documents:
-        counts = term_counts(" ".join([doc.get("title") or "", doc["original_filename"], doc.get("canonical_text", "")]))
-        for entity in doc.get("pages", []):
-            counts.update(entity.get("top_terms", []))
+        counts = term_counts(" ".join([doc.get("title") or "", doc["original_filename"], _topic_source_text(doc)]))
         doc_counts[doc["doc_id"]] = counts
         df.update(counts.keys())
     total_docs = len(documents) or 1
@@ -1499,7 +1584,7 @@ def _build_scopes(
 def _topic_label_terms(topic_docs: list[dict[str, Any]], idf: dict[str, float]) -> list[str]:
     counts: Counter[str] = Counter()
     for doc in topic_docs:
-        counts.update(term_counts(" ".join([doc.get("title") or "", doc["original_filename"], doc.get("canonical_text", "")])))
+        counts.update(term_counts(" ".join([doc.get("title") or "", doc["original_filename"], _topic_source_text(doc)])))
     scored = [(term, count * idf.get(term, 1.0)) for term, count in counts.items() if len(term) >= 3]
     scored.sort(key=lambda item: item[1], reverse=True)
     terms: list[str] = []
@@ -1510,6 +1595,10 @@ def _topic_label_terms(topic_docs: list[dict[str, Any]], idf: dict[str, float]) 
         if len(terms) >= 12:
             break
     return terms
+
+
+def _topic_source_text(doc: dict[str, Any]) -> str:
+    return doc.get("topic_text") or doc.get("canonical_text", "")
 
 
 def _topic_quality(topic_docs: list[dict[str, Any]], vectors: dict[str, dict[str, float]], centroid: dict[str, float]) -> dict[str, Any]:

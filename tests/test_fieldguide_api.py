@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from fieldguide import extractors
 from fieldguide.api import FieldguideIndex, build_index
 from fieldguide.extractors import extract_entities, extraction_quality
 from fieldguide.render import render_markdown
@@ -173,6 +174,25 @@ def test_extraction_quality_carries_ocr_confidence():
 
     assert quality["ocr_confidence"] == 0.8734
     assert quality["layout_confidence"] is None
+
+
+def test_docling_backend_keeps_topic_text_separate(monkeypatch, tmp_path):
+    def fake_docling(_path):
+        return "Evidence text with noisy form chrome", [], {"pdf_backend": "docling", "topic_text_available": True}, ["Clean topic signal"]
+
+    monkeypatch.setattr(extractors, "_extract_pdf_docling", fake_docling)
+    source = tmp_path / "corpus"
+    source.mkdir()
+    (source / "sample.pdf").write_bytes(b"%PDF fake")
+
+    index_dir = tmp_path / "index"
+    build_index(source, index_dir, config={"extraction": {"pdf_backend": "docling"}})
+    index = FieldguideIndex(index_dir)
+    doc = index.documents[0]
+
+    assert doc["canonical_text"] == "Evidence text with noisy form chrome"
+    assert doc["topic_text"] == "Clean topic signal"
+    assert doc["metadata"]["pdf_backend"] == "docling"
 
 
 def test_markdown_renderer_for_orientation(tmp_path):
