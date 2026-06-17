@@ -14,8 +14,20 @@ from .api import FieldguideIndex
 mcp = FastMCP(
     "fieldguide",
     instructions=(
-        "Use these tools to orient to and query a Fieldguide corpus. "
-        "The raw index is intentionally not exposed as a resource or tool result."
+        "Use Fieldguide as a bounded corpus navigation and evidence tool. "
+        "Do not inspect raw index files or ask for the index path; use only these MCP tools. "
+        "Start broad, then narrow: call fieldguide_orient first unless the user gave a specific "
+        "scope, topic, doc, or snippet ID. Use returned topic IDs, scope IDs, suggested actions, "
+        "facets, and warnings to choose the next tool call. Use fieldguide_search for focused "
+        "queries; prefer a returned scope_id or topic_id over full-corpus search once one is known. "
+        "Use fieldguide_expand_topic and fieldguide_topic_card to understand a topic before making "
+        "claims about it. Use fieldguide_doc_card to triage a document, then fieldguide_read_window "
+        "or fieldguide_read_pages for bounded evidence. Treat orientations, topic cards, search "
+        "snippets, and facets as navigation aids, not complete factual summaries. Base factual "
+        "answers on evidence returned by read tools whenever precision matters, and cite doc_id, "
+        "title, page number, and character range when available. Keep searches iterative and small "
+        "at first; broaden only when results are thin. If the tools return extraction warnings, "
+        "surface them when they affect confidence."
     ),
 )
 
