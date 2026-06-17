@@ -33,3 +33,31 @@ Entity extraction combines exact regex extraction for handles such as emails, ph
 money amounts, and case-like identifiers with spaCy's `en_core_web_md` statistical NER
 model for people, organizations, and locations. The small model is kept as a fallback if the
 medium model is unavailable.
+
+## MCP Server
+
+Fieldguide can run as a stdio MCP server that exposes only bounded query tools. Configure the
+index path server-side with `FIELDGUIDE_INDEX`; do not put the raw index in the agent workspace.
+
+```json
+{
+  "mcpServers": {
+    "fieldguide-cpd": {
+      "command": "fieldguide-mcp",
+      "env": {
+        "FIELDGUIDE_INDEX": "/Users/nrh146/.fieldguide-indexes/cpd"
+      }
+    }
+  }
+}
+```
+
+Available tools:
+
+- `fieldguide_orient`
+- `fieldguide_expand_topic`
+- `fieldguide_topic_card`
+- `fieldguide_search`
+- `fieldguide_doc_card`
+- `fieldguide_read_window`
+- `fieldguide_read_pages`
