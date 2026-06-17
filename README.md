@@ -61,3 +61,36 @@ Available tools:
 - `fieldguide_doc_card`
 - `fieldguide_read_window`
 - `fieldguide_read_pages`
+
+## LanceDB Hybrid Search
+
+Fieldguide also ships a separate LanceDB-backed hybrid search index and MCP server. This is
+an alternative search path, not a replacement for the orientation API above. It reuses the
+same document extraction and chunking pipeline, defaults PDF preprocessing to docling, embeds
+chunks locally with `BAAI/bge-small-en-v1.5`, and stores a LanceDB table under the requested
+index directory.
+
+```bash
+uv run fieldguide-hybrid build-source ./corpus --index .fieldguide_lancedb --pdf-backend docling
+uv run fieldguide-hybrid build-from-json .fieldguide_index --index .fieldguide_lancedb
+uv run fieldguide-hybrid search --index .fieldguide_lancedb --query "competitive bidding" --mode hybrid
+```
+
+Run it as a separate stdio MCP server with `FIELDGUIDE_HYBRID_INDEX`:
+
+```json
+{
+  "mcpServers": {
+    "fieldguide-hybrid-cpd": {
+      "command": "fieldguide-hybrid-mcp",
+      "env": {
+        "FIELDGUIDE_HYBRID_INDEX": "/Users/nrh146/.fieldguide-indexes/cpd-lancedb"
+      }
+    }
+  }
+}
+```
+
+Available tool:
+
+- `fieldguide_hybrid_search`

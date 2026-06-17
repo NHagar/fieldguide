@@ -9,13 +9,18 @@ dependencies = [
     "docling>=2.102.2",
     "en-core-web-md",
     "en-core-web-sm",
+    "lancedb>=0.33.0",
     "mcp>=1.27,<2",
+    "pyarrow>=24.0.0",
+    "sentence-transformers>=5.6.0",
     "spacy>=3.8,<4",
 ]
 
 [project.scripts]
 fieldguide = "fieldguide.cli:main"
 fieldguide-mcp = "fieldguide.mcp_server:main"
+fieldguide-hybrid = "fieldguide.hybrid_cli:main"
+fieldguide-hybrid-mcp = "fieldguide.hybrid_mcp_server:main"
 
 [dependency-groups]
 dev = [
