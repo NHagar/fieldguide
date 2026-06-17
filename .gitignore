@@ -5,4 +5,5 @@ __pycache__/
 *.py[cod]
 .fieldguide_index/
 .fieldguide_cpd_index/
+.fieldguide_cpd_docling_index/
 cpd_corpus/
