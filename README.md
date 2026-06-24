@@ -1,6 +1,6 @@
-# Fieldguide
+# FieldGuide
 
-Fieldguide is an agent-facing corpus orientation tool. It indexes a local directory into
+FieldGuide is an agent-facing corpus orientation tool. It indexes a local directory into
 bounded, provenance-rich JSON records and exposes the minimal v0 API from the specification:
 
 - `orient_corpus`
